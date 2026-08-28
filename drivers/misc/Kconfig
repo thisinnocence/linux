@@ -5,6 +5,15 @@
 
 menu "Misc devices"
 
+config SYSLAB_SEC
+	tristate "Syslab sec XOR MMIO device"
+	depends on OF && HAS_IOMEM && SYSFS
+	help
+	  This driver supports the sec XOR MMIO device in the Syslab
+	  mini-virt machine. It exposes the DATA1, DATA2, CMD and RESULT
+	  registers through sysfs, allowing userspace to request and read
+	  a 32-bit XOR operation.
+
 config SENSORS_LIS3LV02D
 	tristate
 	depends on INPUT

@@ -55,5 +55,10 @@
         compatible = "arm,pl011", "arm,primecell";
     };
 
+	sec@a000000 {
+		compatible = "syslab,sec";
+		reg = <0x00 0x0a000000 0x00 0x400>;
+	};
+
     chosen { bootargs = "nokaslr root=/dev/ram init=/linuxrc console=ttyAMA0 console=ttyS0"; };
 };
