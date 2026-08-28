@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Syslab sec XOR MMIO 设备驱动
+ * Syslab sec XOR MMIO 字符设备驱动
  *
- * 通过 sysfs 直接暴露四个 U32 register，便于在 mini-virt guest 中实验
+ * write 传入两个 U32 操作数并触发 XOR，read 返回 U32 结果，ioctl 清零结果
  */
 
-#include <linux/device.h>
+#include <linux/fs.h>
 #include <linux/io.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/uaccess.h>
+#include <uapi/linux/sec.h>
 
 #define SEC_DATA1	0x00
 #define SEC_DATA2	0x04
@@ -18,103 +22,95 @@
 
 struct sec_device {
 	void __iomem *base;
+	struct miscdevice miscdev;
+	/* 保护一次完整的 register 事务 */
+	struct mutex lock;
 };
 
-static ssize_t data1_show(struct device *dev, struct device_attribute *attr,
-			  char *buf)
+static struct sec_device *file_to_sec(struct file *file)
 {
-	struct sec_device *sec = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "0x%08x\n", readl(sec->base + SEC_DATA1));
+	return container_of(file->private_data, struct sec_device, miscdev);
 }
 
-static ssize_t data1_store(struct device *dev, struct device_attribute *attr,
-			   const char *buf, size_t count)
+static int sec_open(struct inode *inode, struct file *file)
 {
-	struct sec_device *sec = dev_get_drvdata(dev);
-	u32 value;
-	int ret;
-
-	ret = kstrtou32(buf, 0, &value);
-	if (ret)
-		return ret;
-
-	writel(value, sec->base + SEC_DATA1);
-	return count;
-}
-static DEVICE_ATTR_RW(data1);
-
-static ssize_t data2_show(struct device *dev, struct device_attribute *attr,
-			  char *buf)
-{
-	struct sec_device *sec = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "0x%08x\n", readl(sec->base + SEC_DATA2));
+	file->private_data = file_to_sec(file);
+	return 0;
 }
 
-static ssize_t data2_store(struct device *dev, struct device_attribute *attr,
-			   const char *buf, size_t count)
+static int sec_release(struct inode *inode, struct file *file)
 {
-	struct sec_device *sec = dev_get_drvdata(dev);
-	u32 value;
-	int ret;
-
-	ret = kstrtou32(buf, 0, &value);
-	if (ret)
-		return ret;
-
-	writel(value, sec->base + SEC_DATA2);
-	return count;
-}
-static DEVICE_ATTR_RW(data2);
-
-static ssize_t cmd_show(struct device *dev, struct device_attribute *attr,
-			char *buf)
-{
-	struct sec_device *sec = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "0x%08x\n", readl(sec->base + SEC_CMD));
+	return 0;
 }
 
-static ssize_t cmd_store(struct device *dev, struct device_attribute *attr,
-			 const char *buf, size_t count)
+static ssize_t sec_read(struct file *file, char __user *buf, size_t count,
+			loff_t *ppos)
 {
-	struct sec_device *sec = dev_get_drvdata(dev);
-	u32 value;
-	int ret;
+	struct sec_device *sec = file->private_data;
+	u32 result;
 
-	ret = kstrtou32(buf, 0, &value);
-	if (ret)
-		return ret;
-	if (value > 1)
+	if (count < sizeof(result))
 		return -EINVAL;
 
-	writel(value, sec->base + SEC_CMD);
-	return count;
-}
-static DEVICE_ATTR_RW(cmd);
+	mutex_lock(&sec->lock);
+	result = readl(sec->base + SEC_RESULT);
+	mutex_unlock(&sec->lock);
 
-static ssize_t result_show(struct device *dev, struct device_attribute *attr,
-			   char *buf)
+	if (copy_to_user(buf, &result, sizeof(result)))
+		return -EFAULT;
+
+	return sizeof(result);
+}
+
+static ssize_t sec_write(struct file *file, const char __user *buf,
+			 size_t count, loff_t *ppos)
 {
-	struct sec_device *sec = dev_get_drvdata(dev);
+	struct sec_device *sec = file->private_data;
+	struct sec_operands operands;
 
-	return sysfs_emit(buf, "0x%08x\n", readl(sec->base + SEC_RESULT));
+	if (count != sizeof(operands))
+		return -EINVAL;
+	if (copy_from_user(&operands, buf, sizeof(operands)))
+		return -EFAULT;
+
+	/* 保证两个操作数和执行命令组成一次完整事务 */
+	mutex_lock(&sec->lock);
+	writel(operands.data1, sec->base + SEC_DATA1);
+	writel(operands.data2, sec->base + SEC_DATA2);
+	writel(1, sec->base + SEC_CMD);
+	mutex_unlock(&sec->lock);
+
+	return sizeof(operands);
 }
-static DEVICE_ATTR_RO(result);
 
-static struct attribute *sec_attrs[] = {
-	&dev_attr_data1.attr,
-	&dev_attr_data2.attr,
-	&dev_attr_cmd.attr,
-	&dev_attr_result.attr,
-	NULL,
+static long sec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct sec_device *sec = file->private_data;
+
+	if (cmd != SEC_IOC_CLEAR)
+		return -ENOTTY;
+
+	mutex_lock(&sec->lock);
+	writel(0, sec->base + SEC_CMD);
+	mutex_unlock(&sec->lock);
+
+	return 0;
+}
+
+static const struct file_operations sec_fops = {
+	.owner = THIS_MODULE,
+	.open = sec_open,
+	.release = sec_release,
+	.read = sec_read,
+	.write = sec_write,
+	.unlocked_ioctl = sec_ioctl,
+	.llseek = no_llseek,
 };
-ATTRIBUTE_GROUPS(sec);
 
 static int sec_probe(struct platform_device *pdev)
 {
 	struct sec_device *sec;
+	int ret;
 
 	sec = devm_kzalloc(&pdev->dev, sizeof(*sec), GFP_KERNEL);
 	if (!sec)
@@ -124,10 +120,31 @@ static int sec_probe(struct platform_device *pdev)
 	if (IS_ERR(sec->base))
 		return PTR_ERR(sec->base);
 
+	mutex_init(&sec->lock);
+	sec->miscdev = (struct miscdevice) {
+		.minor = MISC_DYNAMIC_MINOR,
+		.name = "sec",
+		.fops = &sec_fops,
+		.parent = &pdev->dev,
+		.mode = 0600,
+	};
+
+	ret = misc_register(&sec->miscdev);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "failed to register misc device\n");
+
 	platform_set_drvdata(pdev, sec);
-	dev_info(&pdev->dev, "sec XOR device ready\n");
+	dev_info(&pdev->dev, "sec XOR character device ready\n");
 
 	return 0;
+}
+
+static void sec_remove(struct platform_device *pdev)
+{
+	struct sec_device *sec = platform_get_drvdata(pdev);
+
+	misc_deregister(&sec->miscdev);
 }
 
 static const struct of_device_id sec_of_match[] = {
@@ -140,11 +157,11 @@ static struct platform_driver sec_driver = {
 	.driver = {
 		.name = "syslab-sec",
 		.of_match_table = sec_of_match,
-		.dev_groups = sec_groups,
 	},
 	.probe = sec_probe,
+	.remove_new = sec_remove,
 };
 module_platform_driver(sec_driver);
 
-MODULE_DESCRIPTION("Syslab sec XOR MMIO device driver");
+MODULE_DESCRIPTION("Syslab sec XOR MMIO character device driver");
 MODULE_LICENSE("GPL");
