@@ -58,6 +58,9 @@
 	sec@a000000 {
 		compatible = "syslab,sec";
 		reg = <0x00 0x0a000000 0x00 0x400>;
+		// DT SPI number 从 0 开始，Linux GIC domain 会加 32 转成硬件 INTID
+		// 此处 SPI 2 对应 GIC INTID 34，0x04 表示 level-high
+		interrupts = <0x00 0x02 0x04>;
 	};
 
     chosen { bootargs = "nokaslr root=/dev/ram init=/linuxrc console=ttyAMA0 console=ttyS0"; };

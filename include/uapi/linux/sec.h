@@ -13,5 +13,6 @@ struct sec_operands {
 
 #define SEC_IOC_MAGIC	's'
 #define SEC_IOC_CLEAR	_IO(SEC_IOC_MAGIC, 0)
+#define SEC_IOC_GET_IRQ_COUNT	_IOR(SEC_IOC_MAGIC, 1, __u32)
 
 #endif /* _UAPI_LINUX_SEC_H */
