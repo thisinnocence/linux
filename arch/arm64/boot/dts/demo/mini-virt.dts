@@ -55,12 +55,26 @@
         compatible = "arm,pl011", "arm,primecell";
     };
 
+	smmu: iommu@b000000 {
+		compatible = "arm,smmu-v3";
+		reg = <0x00 0x0b000000 0x00 0x20000>;
+		interrupts = <0x00 0x03 0x01>,
+			     <0x00 0x04 0x01>,
+			     <0x00 0x05 0x01>,
+			     <0x00 0x06 0x01>;
+		interrupt-names = "eventq", "priq", "cmdq-sync", "gerror";
+		#iommu-cells = <0x01>;
+		dma-coherent;
+	};
+
 	sec@a000000 {
 		compatible = "syslab,sec";
 		reg = <0x00 0x0a000000 0x00 0x400>;
 		// DT SPI number 从 0 开始，Linux GIC domain 会加 32 转成硬件 INTID
 		// 此处 SPI 2 对应 GIC INTID 34，0x04 表示 level-high
 		interrupts = <0x00 0x02 0x04>;
+		iommus = <&smmu 0x01>;
+		dma-coherent;
 	};
 
     chosen { bootargs = "nokaslr root=/dev/ram init=/linuxrc console=ttyAMA0 console=ttyS0"; };

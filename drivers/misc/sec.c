@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Syslab sec XOR MMIO 字符设备驱动
+ * Syslab sec XOR 和 DMA MMIO 字符设备驱动
  *
- * write 传入两个 U32 操作数并触发 XOR，read 返回 U32 结果，ioctl 清零结果
+ * write/read 验证 PIO XOR，ioctl 使用 coherent buffer 验证 SMMUv3 DMA
  */
 
 #include <linux/completion.h>
+#include <linux/dma-mapping.h>
 #include <linux/fs.h>
 #include <linux/io.h>
 #include <linux/interrupt.h>
@@ -22,8 +23,16 @@
 #define SEC_CMD		0x08
 #define SEC_RESULT	0x0c
 #define SEC_IRQ_STATUS	0x10
+#define SEC_DMA_SRC_LO	0x14
+#define SEC_DMA_SRC_HI	0x18
+#define SEC_DMA_DST_LO	0x1c
+#define SEC_DMA_DST_HI	0x20
+#define SEC_DMA_LEN	0x24
+#define SEC_DMA_CMD	0x28
+#define SEC_DMA_STATUS	0x2c
 
 #define SEC_IRQ_PENDING	BIT(0)
+#define SEC_DMA_DONE	BIT(0)
 #define SEC_IRQ_TIMEOUT_MS	1000
 
 struct sec_device {
@@ -31,6 +40,11 @@ struct sec_device {
 	struct miscdevice miscdev;
 	atomic_t irq_count;
 	struct completion command_done;
+	void *dma_src;
+	dma_addr_t dma_src_addr;
+	void *dma_dst;
+	dma_addr_t dma_dst_addr;
+	u32 dma_status;
 	/* 保护一次完整的 register 事务 */
 	struct mutex lock;
 };
@@ -100,12 +114,59 @@ static ssize_t sec_write(struct file *file, const char __user *buf,
 static long sec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct sec_device *sec = file->private_data;
+	struct sec_dma_copy transaction;
+	u32 dma_status;
 	u32 irq_count;
+	long ret;
 
 	if (cmd == SEC_IOC_GET_IRQ_COUNT) {
 		irq_count = atomic_read(&sec->irq_count);
 		if (copy_to_user((void __user *)arg, &irq_count,
 				 sizeof(irq_count)))
+			return -EFAULT;
+		return 0;
+	}
+
+	if (cmd == SEC_IOC_DMA_COPY) {
+		if (copy_from_user(&transaction, (void __user *)arg,
+				   sizeof(transaction)))
+			return -EFAULT;
+		if (!transaction.len || transaction.len > SEC_DMA_MAX_LEN)
+			return -EINVAL;
+
+		mutex_lock(&sec->lock);
+		memcpy(sec->dma_src, transaction.src, transaction.len);
+		memset(sec->dma_dst, 0, transaction.len);
+		sec->dma_status = 0;
+		reinit_completion(&sec->command_done);
+		dma_wmb();
+		writel(lower_32_bits(sec->dma_src_addr),
+		       sec->base + SEC_DMA_SRC_LO);
+		writel(upper_32_bits(sec->dma_src_addr),
+		       sec->base + SEC_DMA_SRC_HI);
+		writel(lower_32_bits(sec->dma_dst_addr),
+		       sec->base + SEC_DMA_DST_LO);
+		writel(upper_32_bits(sec->dma_dst_addr),
+		       sec->base + SEC_DMA_DST_HI);
+		writel(transaction.len, sec->base + SEC_DMA_LEN);
+		writel(1, sec->base + SEC_DMA_CMD);
+		ret = wait_for_completion_timeout(
+			&sec->command_done,
+			msecs_to_jiffies(SEC_IRQ_TIMEOUT_MS));
+		if (ret)
+			dma_rmb();
+		dma_status = sec->dma_status;
+		if (ret && dma_status == SEC_DMA_DONE)
+			memcpy(transaction.dst, sec->dma_dst,
+			       transaction.len);
+		mutex_unlock(&sec->lock);
+
+		if (!ret)
+			return -ETIMEDOUT;
+		if (dma_status != SEC_DMA_DONE)
+			return -EIO;
+		if (copy_to_user((void __user *)arg, &transaction,
+				 sizeof(transaction)))
 			return -EFAULT;
 		return 0;
 	}
@@ -123,15 +184,23 @@ static long sec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 static irqreturn_t sec_irq_handler(int irq, void *data)
 {
 	struct sec_device *sec = data;
+	u32 dma_status;
 	u32 result;
 
 	if (!(readl(sec->base + SEC_IRQ_STATUS) & SEC_IRQ_PENDING))
 		return IRQ_NONE;
 
+	dma_status = readl(sec->base + SEC_DMA_STATUS);
 	result = readl(sec->base + SEC_RESULT);
+	if (dma_status)
+		writel(dma_status, sec->base + SEC_DMA_STATUS);
 	writel(SEC_IRQ_PENDING, sec->base + SEC_IRQ_STATUS);
+	sec->dma_status = dma_status;
 	atomic_inc(&sec->irq_count);
-	pr_info("[sec-irq]: result=0x%08x\n", result);
+	if (dma_status)
+		pr_info("[sec-irq]: dma status=0x%08x\n", dma_status);
+	else
+		pr_info("[sec-irq]: result=0x%08x\n", result);
 	complete(&sec->command_done);
 
 	return IRQ_HANDLED;
@@ -165,6 +234,20 @@ static int sec_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "failed to set DMA mask\n");
+
+	sec->dma_src = dmam_alloc_coherent(&pdev->dev, SEC_DMA_MAX_LEN,
+					   &sec->dma_src_addr, GFP_KERNEL);
+	if (!sec->dma_src)
+		return -ENOMEM;
+	sec->dma_dst = dmam_alloc_coherent(&pdev->dev, SEC_DMA_MAX_LEN,
+					   &sec->dma_dst_addr, GFP_KERNEL);
+	if (!sec->dma_dst)
+		return -ENOMEM;
+
 	atomic_set(&sec->irq_count, 0);
 	init_completion(&sec->command_done);
 	ret = devm_request_irq(&pdev->dev, irq, sec_irq_handler, 0,
@@ -188,7 +271,9 @@ static int sec_probe(struct platform_device *pdev)
 				     "failed to register misc device\n");
 
 	platform_set_drvdata(pdev, sec);
-	dev_info(&pdev->dev, "sec XOR character device ready\n");
+	dev_info(&pdev->dev,
+		 "sec XOR and DMA character device ready, src=%pad dst=%pad\n",
+		 &sec->dma_src_addr, &sec->dma_dst_addr);
 
 	return 0;
 }
@@ -216,5 +301,5 @@ static struct platform_driver sec_driver = {
 };
 module_platform_driver(sec_driver);
 
-MODULE_DESCRIPTION("Syslab sec XOR MMIO character device driver");
+MODULE_DESCRIPTION("Syslab sec XOR and DMA MMIO character device driver");
 MODULE_LICENSE("GPL");
