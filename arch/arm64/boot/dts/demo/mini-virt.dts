@@ -68,14 +68,41 @@
 	};
 
 	sec@a000000 {
-		compatible = "syslab,sec";
-		reg = <0x00 0x0a000000 0x00 0x400>;
-		// DT SPI number 从 0 开始，Linux GIC domain 会加 32 转成硬件 INTID
-		// 此处 SPI 2 对应 GIC INTID 34，0x04 表示 level-high
-		interrupts = <0x00 0x02 0x04>;
-		iommus = <&smmu 0x01>;
+		compatible = "syslab,sec-vf";
+		reg = <0x00 0x0a000000 0x00 0x1000>;
+		// VF 0: SPI 8, GIC INTID 40, level-high.
+		interrupts = <0x00 0x08 0x04>;
+		iommus = <&smmu 1>;
 		dma-coherent;
 	};
+
+	sec@a001000 {
+		compatible = "syslab,sec-vf";
+		reg = <0x00 0x0a001000 0x00 0x1000>;
+		// VF 1: SPI 9, GIC INTID 41, level-high.
+		interrupts = <0x00 0x09 0x04>;
+		iommus = <&smmu 2>;
+		dma-coherent;
+	};
+
+	sec@a002000 {
+		compatible = "syslab,sec-vf";
+		reg = <0x00 0x0a002000 0x00 0x1000>;
+		// VF 2: SPI 10, GIC INTID 42, level-high.
+		interrupts = <0x00 0x0a 0x04>;
+		iommus = <&smmu 3>;
+		dma-coherent;
+	};
+
+	sec@a003000 {
+		compatible = "syslab,sec-vf";
+		reg = <0x00 0x0a003000 0x00 0x1000>;
+		// VF 3: SPI 11, GIC INTID 43, level-high.
+		interrupts = <0x00 0x0b 0x04>;
+		iommus = <&smmu 4>;
+		dma-coherent;
+	};
+
 
     chosen { bootargs = "nokaslr root=/dev/ram init=/linuxrc console=ttyAMA0 console=ttyS0"; };
 };
