@@ -9,15 +9,23 @@
         #size-cells = <0x00>;
         #address-cells = <0x01>;
         cpu@0 {
+            device_type = "cpu";
             reg = <0x00>;
-			enable-method = "psci";
+            enable-method = "psci";
             compatible = "arm,cortex-a57";
         };
         cpu@1 {
+            device_type = "cpu";
             reg = <0x01>;
-			enable-method = "psci"; // this is for secondary cpu power on
+            enable-method = "psci";
             compatible = "arm,cortex-a57";
         };
+    };
+
+    // QEMU arm_load_dtb 根据实际 conduit 重建 /psci 节点
+    psci {
+        compatible = "arm,psci-1.0", "arm,psci-0.2";
+        method = "smc";
     };
 
     memory@40000000 { reg = <0x00 0x40000000 0x01 0x00>; };
